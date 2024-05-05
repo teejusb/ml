@@ -5,80 +5,125 @@ import torch.nn as nn
 
 
 class InputEmbedding(nn.Module):
-  def __init__(self, d_model: int, vocab_size: int):
+  """Creates a mapping from the input vocabulary to the model's dimension."""
+  def __init__(self, vocab_size: int, d_model: int):
     super(InputEmbedding, self).__init__()
-    # Number of dimensions in the model.
-    self.d_model = d_model
     # Size of the vocabulary.
     self.vocab_size = vocab_size
+    # Number of dimensions in the model.
+    self.d_model = d_model
     # Embedding layer.
     self.embedding = nn.Embedding(vocab_size, d_model)
   
   def forward(self, x: torch.Tensor) -> torch.Tensor:
-    # To prevent the embeddings from becoming too small, multiply the embeddings
-    # by sqrt(d_model).
+    """Take an input tensor and return its corresponding embeddings.
+
+    Args:
+      x: A tensor of shape (batch_size, context_size) representing the input.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      embeddings of the input.
+    """
+    # As mentioned in section 3.4 of the paper, we multiply the embeddings by
+    # sqrt(d_model), likely to prevent the embeddings from becoming too small.
     return self.embedding(x) * math.sqrt(self.d_model)
   
 
 class PositionalEncoding(nn.Module):
-  def __init__(self, d_model: int, context_size: int, dropout: float = 0.1):
+  """Adds positional encoding to the input.
+  
+  This is done by using sine and cosine functions of different frequencies tp
+  create the positional encoding.
+
+  The even indices use the sine function and the odd indices use the cosine
+  function based on the following equation:
+
+  PE(pos, 2i) = sin(pos / 10000^(2i/d_model)) -> even indices
+  PE(pos, 2i + 1) = cos(pos / 10000^(2i/d_model)) -> odd indices
+
+  where pos is the position within the embedded input, i is ith index,
+  and d_model is dimension of the embedding.
+  """
+  def __init__(self, context_size: int, d_model: int, dropout: float = 0.1):
     super(PositionalEncoding, self).__init__()
-    # Number of dimensions in the model.
-    self.d_model = d_model
     # Max length of the input sequence.
     self.context_size = context_size
+    # Number of dimensions in the model.
+    self.d_model = d_model
     # Dropout rate.
     self.dropout = nn.Dropout(dropout)
 
     # Create a positional encoding.
-    #                   --> d_model
-    #              |
-    # context_size |
-    #              v
+    #                 --> d_model
+    #              |[ [0, 0, 0, 0]
+    # context_size |  [0, 0, 0, 0]
+    #              |  [0, 0, 0, 0]
+    #              v  [0, 0, 0, 0] ]
     positional_encoding = torch.zeros(context_size, d_model)
 
     # Create a tensor that represents positions (0 -> context_size - 1)
     # [0, 1, 2, ..., context_size - 1] -> then becomes:
-    # [[0], [1], [2], ..., [context_size - 1]]
+    #                  --> 1
+    #              |[ [0]
+    # context_size |  [1]
+    #              |  ...
+    #              v  [context_size -1] ]
     position = torch.arange(0, context_size, dtype=torch.float).unsqueeze(1)
 
-    # The paper uses sine and cosine functions of different frequencies
-    # to create the positional encoding.
-    #
-    # The even indices use the sine function and the odd indices use the cosine
-    # function.
-    # sin(pos / 10000^(2i/d_model)) -> even indices
-    # cos(pos / 10000^(2i/d_model)) -> odd indices
+    # Dividing by 10000^(2i/d_model) is the same as multiplying by:
+    # 1 / 10000^(2i/d_model)
     # 
-    # -log(10000) / d_model = (log(1/10000) / d_model)
-    # log(1/10000) / d_model = log( (1/100000) ^ (1/d_model) )
-    # 2i * log( (1/100000) ^ (1/d_model) ) = log( (1/10000)^(2i / d_model) )
-    # e^( log( (1/10000)^(2i / d_model) ) = (1/10000)^(2i/d_model)
-    # (1/10000)^(2i/d_model) = 1 / 10000^(2i/d_model)
+    # Since 10000^x can get large very quickly, we can rewrite this as:
+    #
+    # 1 / 10000^(2i/d_model) = (1/10000)^(2i/d_model)
+    #                        = e^(log( (1/10000)^(2i / d_model) ))
+    #                        = e^( (2i / d_model) * log(1/10000) )
+    #                        = e^( 2i * log(1/10000) / (d_model) )
+    #                        = e^( 2i * -log(10000) / d_model )
     denominator = torch.exp(
       torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
+    # Looks like:
+    #                      --> d_model
+    #              |[ [s0_0, c0_0, s1_0, c1_0]
+    # context_size |  [s0_1, c0_1, s1_1, c1_1]
+    #              |  [s0_2, c0_2, s1_2, c1_2]
+    #              v  [s0_3, c0_3, s1_3, c1_3] ]
+    # for si_pos, ci_pos
     positional_encoding[:, 0::2] = torch.sin(position * denominator)
     positional_encoding[:, 1::2] = torch.cos(position * denominator)
 
-    # Add a batch dimension to the positional encoding.
-    # unsqueeze converts it back to:
-    # [sin_0, cos_0, sin_1, cos_1, ..., sin_context_size, cos_context_size]
-    positional_encoding = positional_encoding.unsqueeze(0)
-
-    # Register the positional encoding as a buffer.
-    self.register_buffer('positional_encoding', positional_encoding)
+    # Register the positional encoding as a buffer so that it is saved with the
+    # model and not treated as a parameter.
+    self.register_buffer('positional_encoding',
+                         positional_encoding.unsqueeze(0))
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Add the positional encoding to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+        
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      input with the positional encoding added.
+    """
     # Add the positional encoding to the input
-    x = x + (self.positional_encoding[:, :x.size(1), :]).requires_grad_(False)
+    x = x + (self.positional_encoding[:, :x.size(1)]).requires_grad_(False)
     return self.dropout(x)
 
 
 class LayerNormalization(nn.Module):
+  """Applies layer normalization to the input.
+  
+  This is used to normalize the input so that the mean is 0 and the standard
+  deviation is 1. This helps the model learn more effectively.
+  """
   def __init__(self, epsilon: float = 1e-6):
     super(LayerNormalization, self).__init__()
-    # Define a small value to prevent division by zero.
+    # Define a small value to prevent any division by zero.
     self.epsilon = epsilon
     
     # Alpha is a learnable parameter that scales the normalized input.
@@ -88,30 +133,41 @@ class LayerNormalization(nn.Module):
     self.beta = nn.Parameter(torch.zeros(1))
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Apply layer normalization to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+        
+      Returns:
+        A tensor of shape (batch_size, context_size, d_model) representing the
+        normalized input.
+    """
     mean = x.mean(dim=-1, keepdim=True)
     std = x.std(dim=-1, keepdim=True)
 
     # Normalize the input.
-    if std == 0:
-      std = std + self.epsilon
-    x = (x - mean) / (std)
+    x = (x - mean) / (std + self.epsilon)
     return self.alpha * x + self.beta
   
 
-# Feed-Forward Network:
-# This feed-forward network consists of two linear transformations
-# with a ReLU activation function in between.
-#
-# Essentially is a 3 layer NN that converts the input dimension to
-# a smaller dimension and then back to the original dimension.
-#
-# This lets the model learn more complex functions.
-#
-# Represented by the following equation:
-# FFN(x) = max(0, xW1 + b1)W2 + b2
-#
-# input -> linear1 -> ReLU -> linear2 -> output
 class FeedForward(nn.Module):
+  """Applies a feed-forward network to the input.
+
+  This feed-forward network consists of two linear transformations with a ReLU
+  activation function in between.
+
+  Essentially this is a 3 layer NN that scales the input dimension to a
+  larger dimensional space and then scales it back down to the original
+  dimension.
+
+  This lets the model learn more complex functions.
+
+  Represented by the following equation:
+  FFN(x) = max(0, xW1 + b1)W2 + b2
+
+  input -> linear1 -> ReLU -> linear2 -> output
+  """
   def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
     super(FeedForward, self).__init__()
     # W1 and b1.
@@ -122,10 +178,26 @@ class FeedForward(nn.Module):
     self.linear2 = nn.Linear(d_ff, d_model)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Apply the feed-forward network to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the feed-forward network.
+    """
     return self.linear2(self.dropout(torch.relu(self.linear1(x))))
 
 
 class MultiHeadAttention(nn.Module):
+  """Applies multi-head attention to the input.
+  
+  This is done by splitting the input into num_heads pieces and applying the
+  scaled dot-product attention mechanism to each piece. The outputs are then
+  concatenated and a linear transformation is applied to the output.
+  """
   def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
     super(MultiHeadAttention, self).__init__()
     # Number of dimensions in the model.
@@ -139,7 +211,7 @@ class MultiHeadAttention(nn.Module):
             'Dimension of the model must be divisible by the number of heads.')
     
     # Dimension of the key, query, and value vectors.
-    self.d_k = d_model // num_heads
+    self.d_keys = d_model // num_heads
 
     # Define the weights for the linear transformations of the query, key, and
     # value vectors.
@@ -148,33 +220,69 @@ class MultiHeadAttention(nn.Module):
     self.w_value = nn.Linear(d_model, d_model)
     self.w_output = nn.Linear(d_model, d_model)
 
-  def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-              mask: bool) -> torch.Tensor:
-    def scaled_dot_product_attention(
-        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-        mask: bool) -> torch.Tensor:
-      # The last dimension of the query, key, and value vectors.
-      d_k = query.size(-1)
-
-      # Calculate Q * K^T / sqrt(d_k)
-      # Only transpose the last two dimensions of key because the first
-      # dimension represents the batch size.
-      scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-
-      # Apply the mask (if it exists).
-      if mask is not None:
-        # Before applying the softmax, conditionally apply the mask to
-        # hide any values that should not be seen by the model.
-        scores = scores.masked_fill(mask == 0, -1e9)
-      
-      # Apply the softmax function to the scores.
-      scores = torch.softmax(scores, dim=-1)
-
-      # Apply dropout to the scores.
-      scores = self.dropout(scores)
-
-      return scores @ value
+  def scaled_dot_product_attention(
+      self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+      mask: torch.Tensor) -> torch.Tensor:
+    """Apply scaled dot-product attention to the input.
     
+    Args:
+      query: A tensor of shape (batch_size, num_heads, context_size, d_keys)
+        representing the query.
+      key: A tensor of shape (batch_size, num_heads, context_size, d_keys)
+        representing the key.
+      value: A tensor of shape (batch_size, num_heads, context_size, d_keys)
+        representing the value.
+      mask: A tensor of shape (batch_size, num_heads, context_size,
+        context_size) representing the mask to apply to the attention scores.
+
+    Returns:
+      A tensor of shape (batch_size, num_heads, context_size, d_keys)
+      representing the output of the scaled dot-product attention.
+    """
+    # The last dimension of the query, key, and value vectors.
+    d_keys = query.size(-1)
+
+    # Calculate Q * K^T / sqrt(d_keys)
+    # Only transpose the last two dimensions of key because the first
+    # dimension represents the batch size.
+    scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_keys)
+
+    # Apply the mask (if it exists).
+    # You usually mask in parallel mode so that we don't let future tokens
+    # influence the current token.
+    # In sequential mode, we don't need to mask because we don't have future
+    # tokens.
+    if mask is not None:
+      # Before applying the softmax, conditionally apply the mask to
+      # hide any values that should not be seen by the model.
+      scores = scores.masked_fill(mask == 0, -1e9)
+    
+    # Apply the softmax function to the scores.
+    scores = torch.softmax(scores, dim=-1)
+
+    # Apply dropout to the scores.
+    scores = self.dropout(scores)
+
+    return scores @ value
+
+  def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+              mask: torch.Tensor) -> torch.Tensor:
+    """Apply multi-head attention to the input.
+    
+    Args:
+      query: A tensor of shape (batch_size, context_size, d_model) representing
+        the query.
+      key: A tensor of shape (batch_size, context_size, d_model) representing
+        the key.
+      value: A tensor of shape (batch_size, context_size, d_model) representing
+        the value.
+      mask: A tensor of shape (batch_size, context_size) representing the mask
+        to apply to the attention scores.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the multi-head attention.
+    """    
     # Apply the linear transformations to the query, key, and value vectors.
     query = self.query(query)
     key = self.key(key)
@@ -182,23 +290,24 @@ class MultiHeadAttention(nn.Module):
 
     # Split the query, key, and value vectors into num_heads pieces.
     query = query.view(
-      query.size(0), -1, self.num_heads, self.d_k).transpose(1, 2)
+      query.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
     key = key.view(
-      key.size(0), -1, self.num_heads, self.d_k).transpose(1, 2)
+      key.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
     value = value.view(
-      value.size(0), -1, self.num_heads, self.d_k).transpose(1, 2)
+      value.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
 
-    output = scaled_dot_product_attention(query, key, value, mask)
+    output = self.scaled_dot_product_attention(query, key, value, mask)
 
     # Concatenate the output of the attention heads.
-    output = output.transpose(1, 2).contiguous().view(output.size(0), -1,
-                                                      self.num_heads * self.d_k)
+    output = output.transpose(1, 2).contiguous().view(
+                output.size(0), -1, self.num_heads * self.d_keys)
 
     # Apply the final linear transformation.
     return self.w_output(output)
   
 
 class AddAndNorm(nn.Module):
+  """Applies the add and norm layer to the input."""
   def __init__(self, dropout: float = 0.1):
     super(AddAndNorm, self).__init__()
     # Dropout to prevent overfitting.
@@ -206,9 +315,22 @@ class AddAndNorm(nn.Module):
     # Layer normalization.
     self.norm = LayerNormalization()
 
-  # Sublayer is the block preceding this layer that we want to add and normalize
-  # as well as add the residual connections to.
+
   def forward(self, x: torch.Tensor, sublayer: nn.Module) -> torch.Tensor:
+    """Apply the add and norm layer to the input.
+    
+    Sublayer is the block preceding this layer that we want to add and normalize
+    as well as add the residual connections to.
+
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+      sublayer: A nn.Module representing the block preceding this layer.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the add and norm layer.
+    """
     return x + self.dropout(sublayer(self.norm(x)))
   
 
@@ -225,7 +347,7 @@ class EncoderBlock(nn.Module):
       AddAndNorm(dropout) for _ in range(2)
     ])
 
-  def forward(self, x: torch.Tensor, mask: bool) -> torch.Tensor:
+  def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     # The first block is the multi-head attention layer + add and norm.
     x = self.add_and_norms[0](x, lambda x: self.attention(x, x, x, mask))
     # Then the feed-forward network + add and norm.
@@ -239,7 +361,7 @@ class Encoder(nn.Module):
     self.layers = layers
     self.norm = LayerNormalization()
 
-  def forward(self, x: torch.Tensor, mask: bool) -> torch.Tensor:
+  def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     # Apply each layer in the encoder to the input.
     for layer in self.layers:
       x = layer(x, mask)
@@ -265,7 +387,7 @@ class DecoderBlock(nn.Module):
     ])
 
   def forward(self, x: torch.Tensor, encoder_output: torch.Tensor,
-              input_mask: bool, output_mask: bool) -> torch.Tensor:
+              input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
     # The first block is the masked multi-head attention layer + add and norm.
     x = self.add_and_norms[0](x, lambda x: self.masked_attention(
         x, x, x, output_mask))
@@ -286,7 +408,7 @@ class Decoder(nn.Module):
     self.norm = LayerNormalization()
 
   def forward(self, x: torch.Tensor, encoder_output: torch.Tensor,
-              input_mask: bool, output_mask: bool) -> torch.Tensor:
+              input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
     # Apply each layer in the decoder to the input.
     for layer in self.layers:
       x = layer(x, encoder_output, input_mask, output_mask)
@@ -326,13 +448,13 @@ class Transformer(nn.module):
     self.decoder = decoder
     self.prediction_layer = prediction_layer
 
-  def encode(self, input: torch.Tensor, mask: bool) -> torch.Tensor:
+  def encode(self, input: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     input = self.input_embeddings(input)
     input = self.input_positional_encoding(input)
     return self.encoder(input, mask)
   
   def decode(self, output: torch.Tensor, encoder_output: torch.Tensor,
-             input_mask: bool, output_mask: bool) -> torch.Tensor:
+             input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
     output = self.output_embeddings(output)
     output = self.output_positional_encoding(output)
     return self.decoder(output, encoder_output, input_mask, output_mask)
@@ -347,9 +469,9 @@ def create_transformer(input_vocab_size: int, output_vocab_size: int,
                        d_model: int, num_heads: int, N: int, d_ff: int,
                        dropout: float) -> Transformer:
   # Create the input embeddings.
-  input_embeddings = InputEmbedding(d_model, input_vocab_size)
+  input_embeddings = InputEmbedding(input_vocab_size, d_model)
   # Create the input positional encoding.
-  input_positional_encoding = PositionalEncoding(d_model, input_context_size)
+  input_positional_encoding = PositionalEncoding(input_context_size, d_model)
   # Create the encoder.
   encoder = Encoder(nn.ModuleList([
     EncoderBlock(
@@ -360,9 +482,9 @@ def create_transformer(input_vocab_size: int, output_vocab_size: int,
   ]))
 
   # Create the output embeddings.
-  output_embeddings = InputEmbedding(d_model, output_vocab_size)
+  output_embeddings = InputEmbedding(output_vocab_size, d_model)
   # Create the output positional encoding.
-  output_positional_encoding = PositionalEncoding(d_model, output_context_size)
+  output_positional_encoding = PositionalEncoding(output_context_size, d_model)
   # Create the decoder.
   decoder = Decoder(nn.ModuleList([
     DecoderBlock(
@@ -396,11 +518,12 @@ def main():
   print(torch.cuda.is_available())
 
   # Define the constants from the paper:
-  d_model = 512
-  num_heads = 8
-  n = 6
-  d_ff = 2048
-  dropout = 0.1
+  
+  d_model = 512  # Dimension of the model, i.e. the input/output embedding size.
+  num_heads = 8  # Number of attention heads.
+  n = 6  # Number of encoder and decoder layers.
+  d_ff = 2048  # Dimension of the feed-forward network.
+  dropout = 0.1  # Dropout rate.
 
 
 if __name__ == "__main__":
