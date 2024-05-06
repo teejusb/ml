@@ -232,9 +232,9 @@ class MultiHeadAttention(nn.Module):
         representing the key.
       value: A tensor of shape (batch_size, num_heads, context_size, d_keys)
         representing the value.
-      mask: A tensor of shape (batch_size, num_heads, context_size,
-        context_size) representing the mask to apply to the attention scores.
-
+      mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores.
     Returns:
       A tensor of shape (batch_size, num_heads, context_size, d_keys)
       representing the output of the scaled dot-product attention.
@@ -243,15 +243,21 @@ class MultiHeadAttention(nn.Module):
     d_keys = query.size(-1)
 
     # Calculate Q * K^T / sqrt(d_keys)
+    #
     # Only transpose the last two dimensions of key because the first
-    # dimension represents the batch size.
+    # two dimensions are the batch size and the number of heads.
+    #
+    # Shape of scores: (batch_size, num_heads, context_size, context_size)
     scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_keys)
 
     # Apply the mask (if it exists).
+    #
     # You usually mask in parallel mode so that we don't let future tokens
     # influence the current token.
     # In sequential mode, we don't need to mask because we don't have future
     # tokens.
+    #
+    # The dimension of the mask is the same as the scores.
     if mask is not None:
       # Before applying the softmax, conditionally apply the mask to
       # hide any values that should not be seen by the model.
@@ -263,7 +269,39 @@ class MultiHeadAttention(nn.Module):
     # Apply dropout to the scores.
     scores = self.dropout(scores)
 
+    # Shape of output: (batch_size, num_heads, context_size, d_keys)
     return scores @ value
+  
+  def split_heads(self, x: torch.Tensor) -> torch.Tensor:
+    """Split the input into num_heads pieces.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+
+    Returns:
+      A tensor of shape (batch_size, num_heads, context_size, d_keys)
+      representing the input split into num_heads pieces.
+    """
+    batch_size, context_size, d_model = x.size()
+    return x.view(
+        batch_size, context_size, self.num_heads, d_model).transpose(1, 2)
+  
+  def concat_heads(self, x: torch.Tensor) -> torch.Tensor:
+    """Concatenate the input back into a single tensor.
+    
+    Args:
+      x: A tensor of shape (batch_size, num_heads, context_size, d_keys)
+        representing the input.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      input concatenated back into a single tensor.
+    """
+    batch_size, _, context_size, _ = x.size()
+    # d_model = num_heads * d_keys since d_model is divisible by num_heads.
+    return x.transpose(1, 2).contiguous().view(
+        batch_size, context_size, self.d_model)
 
   def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
               mask: torch.Tensor) -> torch.Tensor:
@@ -276,31 +314,24 @@ class MultiHeadAttention(nn.Module):
         the key.
       value: A tensor of shape (batch_size, context_size, d_model) representing
         the value.
-      mask: A tensor of shape (batch_size, context_size) representing the mask
-        to apply to the attention scores.
+      mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores.
 
     Returns:
       A tensor of shape (batch_size, context_size, d_model) representing the
       output of the multi-head attention.
     """    
     # Apply the linear transformations to the query, key, and value vectors.
-    query = self.query(query)
-    key = self.key(key)
-    value = self.value(value)
+    query = self.split_heads(self.query(query))
+    key = self.split_heads(self.key(key))
+    value = self.split_heads(self.value(value))
 
-    # Split the query, key, and value vectors into num_heads pieces.
-    query = query.view(
-      query.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
-    key = key.view(
-      key.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
-    value = value.view(
-      value.size(0), -1, self.num_heads, self.d_keys).transpose(1, 2)
-
+    # Calculate the attention scores.
     output = self.scaled_dot_product_attention(query, key, value, mask)
 
     # Concatenate the output of the attention heads.
-    output = output.transpose(1, 2).contiguous().view(
-                output.size(0), -1, self.num_heads * self.d_keys)
+    output = self.concat_heads(output)
 
     # Apply the final linear transformation.
     return self.w_output(output)
@@ -335,6 +366,14 @@ class AddAndNorm(nn.Module):
   
 
 class EncoderBlock(nn.Module):
+  """A single encoder block in the transformer.
+  
+  This block consists of (in order):
+  - Multi-head attention layer.
+  - Add and norm layer.
+  - Feed-forward network.
+  - Add and norm layer.
+  """
   def __init__(self, attention: MultiHeadAttention, feed_forward: FeedForward,
                dropout: float = 0.1):
     super(EncoderBlock, self).__init__()
@@ -348,27 +387,62 @@ class EncoderBlock(nn.Module):
     ])
 
   def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Apply the encoder block to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+      mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the encoder block.
+    """
     # The first block is the multi-head attention layer + add and norm.
     x = self.add_and_norms[0](x, lambda x: self.attention(x, x, x, mask))
     # Then the feed-forward network + add and norm.
     return self.add_and_norms[1](x, self.feed_forward)
 
 
-# The encoder is a stack of N identical encoder blocks.
 class Encoder(nn.Module):
+  """A stack of N identical encoder blocks."""
   def __init__(self, layers: nn.ModuleList):
     super(Encoder, self).__init__()
     self.layers = layers
     self.norm = LayerNormalization()
 
   def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    # Apply each layer in the encoder to the input.
+    """Apply each layer of the encoder to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+      mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the encoder.
+    """
     for layer in self.layers:
       x = layer(x, mask)
     return self.norm(x)
   
 
 class DecoderBlock(nn.Module):
+  """A single decoder block in the transformer.
+
+  This block consists of (in order):
+  - Masked multi-head attention layer.
+  - Add and norm layer.
+  - Multi-head attention layer.
+  - Add and norm layer.
+  - Feed-forward network.
+  - Add and norm layer.
+  """
   def __init__(self,
                masked_attention: MultiHeadAttention,
                attention: MultiHeadAttention,
@@ -388,6 +462,24 @@ class DecoderBlock(nn.Module):
 
   def forward(self, x: torch.Tensor, encoder_output: torch.Tensor,
               input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
+    """Apply the decoder block to the input.
+
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+      encoder_output: A tensor of shape (batch_size, context_size, d_model)
+        representing the output of the encoder.
+      input_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores for the encoder.
+      output_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing
+        the mask to apply to the attention scores for the decoder.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the decoder block.
+    """
     # The first block is the masked multi-head attention layer + add and norm.
     x = self.add_and_norms[0](x, lambda x: self.masked_attention(
         x, x, x, output_mask))
@@ -400,34 +492,64 @@ class DecoderBlock(nn.Module):
     return self.add_and_norms[2](x, self.feed_forward)
 
 
-# The decoder is a stack of N identical decoder blocks.
 class Decoder(nn.Module):
+  """A stack of N identical decoder blocks."""
   def __init__(self, layers: nn.ModuleList):
     super(Decoder, self).__init__()
     self.layers = layers
     self.norm = LayerNormalization()
 
-  def forward(self, x: torch.Tensor, encoder_output: torch.Tensor,
-              input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
-    # Apply each layer in the decoder to the input.
+  def forward(
+      self, x: torch.Tensor, encoder_output: torch.Tensor,
+      input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
+    """Apply each layer in the decoder to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+      encoder_output: A tensor of shape (batch_size, context_size, d_model)
+        representing the output of the encoder.
+      input_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores for the encoder.
+      output_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores for the decoder.
+        
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the decoder.
+    """
     for layer in self.layers:
       x = layer(x, encoder_output, input_mask, output_mask)
     return self.norm(x)
 
 
 class PredictionLayer(nn.Module):
+  """The final layer of the transformer that predicts the output."""
   def __init__(self, d_model: int, vocab_size: int):
     super(PredictionLayer, self).__init__()
     # Linear transformation.
     self.linear = nn.Linear(d_model, vocab_size)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Apply the prediction layer to the input.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size, d_model) representing the
+        input.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, vocab_size) representing the
+      output of the prediction layer.
+    """
     # Apply the linear transformation and the (log) softmax function.
     # The log softmax function is used because it is numerically more stable.
     return torch.log_softmax(self.linear(x), dim=-1)
 
 
 class Transformer(nn.module):
+  """Tha main transformer model that combines the encoder and decoder."""
   def __init__(self,
                input_embeddings: InputEmbedding,
                input_positional_encoding: PositionalEncoding,
@@ -449,12 +571,44 @@ class Transformer(nn.module):
     self.prediction_layer = prediction_layer
 
   def encode(self, input: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Apply the encoder to the input.
+    
+    Args:
+      input: A tensor of shape (batch_size, context_size) representing the
+        input.
+      mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the encoder.
+    """
     input = self.input_embeddings(input)
     input = self.input_positional_encoding(input)
     return self.encoder(input, mask)
   
-  def decode(self, output: torch.Tensor, encoder_output: torch.Tensor,
-             input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
+  def decode(
+      self, output: torch.Tensor, encoder_output: torch.Tensor,
+      input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
+    """Apply the decoder to the output.
+
+    Args:
+      output: A tensor of shape (batch_size, context_size) representing the
+        output.
+      encoder_output: A tensor of shape (batch_size, context_size, d_model)
+        representing the output of the encoder.
+      input_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores for the encoder.
+      output_mask: A tensor of shape
+        (batch_size, num_heads, context_size, context_size) representing the
+        mask to apply to the attention scores for the decoder.
+
+    Returns:
+      A tensor of shape (batch_size, context_size, d_model) representing the
+      output of the decoder.
+    """
     output = self.output_embeddings(output)
     output = self.output_positional_encoding(output)
     return self.decoder(output, encoder_output, input_mask, output_mask)
@@ -463,11 +617,26 @@ class Transformer(nn.module):
     return self.prediction_layer(output)
 
 
-
 def create_transformer(input_vocab_size: int, output_vocab_size: int,
                        input_context_size: int, output_context_size: int,
                        d_model: int, num_heads: int, N: int, d_ff: int,
                        dropout: float) -> Transformer:
+  """Create a transformer model.
+  
+  Args:
+    input_vocab_size: An integer representing the size of the input vocabulary.
+    output_vocab_size: An integer representing the size of the output vocabulary.
+    input_context_size: An integer representing the size of the input context.
+    output_context_size: An integer representing the size of the output context.
+    d_model: An integer representing the dimension of the model.
+    num_heads: An integer representing the number of attention heads.
+    N: An integer representing the number of encoder and decoder layers.
+    d_ff: An integer representing the dimension of the feed-forward network.
+    dropout: A float representing the dropout rate.
+
+  Returns:
+    A Transformer model.
+  """
   # Create the input embeddings.
   input_embeddings = InputEmbedding(input_vocab_size, d_model)
   # Create the input positional encoding.
