@@ -624,15 +624,15 @@ def create_transformer(input_vocab_size: int, output_vocab_size: int,
   """Create a transformer model.
   
   Args:
-    input_vocab_size: An integer representing the size of the input vocabulary.
-    output_vocab_size: An integer representing the size of the output vocabulary.
-    input_context_size: An integer representing the size of the input context.
-    output_context_size: An integer representing the size of the output context.
-    d_model: An integer representing the dimension of the model.
-    num_heads: An integer representing the number of attention heads.
-    N: An integer representing the number of encoder and decoder layers.
-    d_ff: An integer representing the dimension of the feed-forward network.
-    dropout: A float representing the dropout rate.
+    input_vocab_size: integer, The size of the input vocabulary.
+    output_vocab_size: integer, The size of the output vocabulary.
+    input_context_size: integer, The size of the input context.
+    output_context_size: integer, The size of the output context.
+    d_model: integer, The dimension of the model.
+    num_heads: integer, The number of attention heads.
+    N: integer, The number of encoder and decoder layers.
+    d_ff: integer, The dimension of the feed-forward network.
+    dropout: Flow, The dropout rate.
 
   Returns:
     A Transformer model.
@@ -683,16 +683,44 @@ def create_transformer(input_vocab_size: int, output_vocab_size: int,
 
 
 def main():
-  # print cuda is available
+  # Is CUDA available?
   print(torch.cuda.is_available())
 
+
+  # Size of the input vocabulary (e.g. English words)
+  input_vocab_size = 8500
+  # Size of the output vocabulary (e.g. French words)
+  output_vocab_size = 8000
+  # Size of the input context (e.g. len(English sentence))
+  input_context_size = 800
+  # Size of the output context. (e.g. len(French sentence))
+  output_context_size = 800
+
   # Define the constants from the paper:
-  
-  d_model = 512  # Dimension of the model, i.e. the input/output embedding size.
-  num_heads = 8  # Number of attention heads.
-  n = 6  # Number of encoder and decoder layers.
-  d_ff = 2048  # Dimension of the feed-forward network.
-  dropout = 0.1  # Dropout rate.
+  #
+  # Dimension of the model, i.e. the input/output embedding size.
+  d_model = 512
+  # Number of attention heads. 
+  num_heads = 8
+  # Number of encoder and decoder layers.
+  n = 6
+  #  Dimension of the feed-forward network.
+  d_ff = 2048
+  # Dropout rate.
+  dropout = 0.1
+
+  # Create the transformer model.
+  transformer = create_transformer(
+      input_vocab_size=input_vocab_size,
+      output_vocab_size=output_vocab_size,
+      input_context_size=input_context_size,
+      output_context_size=output_context_size,
+      d_model=d_model,
+      num_heads=num_heads,
+      N=n,
+      d_ff=d_ff,
+      dropout=dropout
+  )
 
 
 if __name__ == "__main__":
