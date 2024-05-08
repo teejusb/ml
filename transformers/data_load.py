@@ -126,19 +126,19 @@ class ChunkedWmt2014Dataset(Dataset):
       fr_tensors.append(fr_tensor)
       out_tensors.append(out_tensor)
 
-    if len(en_tensors) < 64:
+    if len(en_tensors) < self.chunk_size:
       pad_en = torch.full(
-        (64 - len(en_tensors), self.context_size),
+        (self.chunk_size - len(en_tensors), self.context_size),
         self.vocab['en']['<PAD>'],
         dtype=torch.int)
 
       pad_fr = torch.full(
-        (64 - len(fr_tensors), self.context_size),
+        (self.chunk_size - len(fr_tensors), self.context_size),
         self.vocab['fr']['<PAD>'],
         dtype=torch.int)
 
       pad_out = torch.full(
-        (64 - len(out_tensors), self.context_size),
+        (self.chunk_size - len(out_tensors), self.context_size),
         self.vocab['fr']['<PAD>'],
         dtype=torch.int)
       en_tensors.append(pad_en)
@@ -220,7 +220,7 @@ def load_data(batch_size: int, train_rows: int):
     print('Vocab built in', time.time() - start, 'seconds.')
 
   max_context_size = max(context_size.values())
-  # Bump up the conetxt size by 2 to account for the <SOS> and <EOS> tokens.
+  # Bump up the context size by 2 to account for the <SOS> and <EOS> tokens.
   max_context_size += 2
 
   train_data = ChunkedWmt2014Dataset(
