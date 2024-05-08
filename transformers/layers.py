@@ -5,7 +5,10 @@ import torch.nn as nn
 
 
 class InputEmbedding(nn.Module):
-  """Creates a mapping from the input vocabulary to the model's dimension."""
+  """Creates a mapping from the input vocabulary to the model's dimension.
+  
+  Total Params: vocab_size * d_model
+  """
   def __init__(self, vocab_size: int, d_model: int):
     super(InputEmbedding, self).__init__()
     # Size of the vocabulary.
@@ -44,6 +47,8 @@ class PositionalEncoding(nn.Module):
 
   where pos is the position within the embedded input, i is ith index,
   and d_model is dimension of the embedding.
+
+  Total Params: 0
   """
   def __init__(self, context_size: int, d_model: int, dropout: float = 0.1):
     super(PositionalEncoding, self).__init__()
@@ -120,6 +125,8 @@ class LayerNormalization(nn.Module):
   
   This is used to normalize the input so that the mean is 0 and the standard
   deviation is 1. This helps the model learn more effectively.
+
+  Total Params: 2 (alpha + beta)
   """
   def __init__(self, epsilon: float = 1e-6):
     super(LayerNormalization, self).__init__()
@@ -167,6 +174,9 @@ class FeedForward(nn.Module):
   FFN(x) = max(0, xW1 + b1)W2 + b2
 
   input -> linear1 -> ReLU -> linear2 -> output
+
+  Total Params = (d_model * d_ff) + d_ff + (d_ff * d_model) + d_model
+               = 2 * (d_model * d_ff) + d_ff + d_model
   """
   def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
     super(FeedForward, self).__init__()
@@ -207,8 +217,8 @@ class MultiHeadAttention(nn.Module):
     # Dropout to prevent overfitting.
     self.dropout = nn.Dropout(dropout)
     
-    assert (d_model % num_heads == 0,
-            'Dimension of the model must be divisible by the number of heads.')
+    assert d_model % num_heads == 0, \
+        'Dimension of the model must be divisible by the number of heads.'
     
     # Dimension of the key, query, and value vectors.
     self.d_keys = d_model // num_heads
@@ -261,7 +271,8 @@ class MultiHeadAttention(nn.Module):
     if mask is not None:
       # Before applying the softmax, conditionally apply the mask to
       # hide any values that should not be seen by the model.
-      scores = scores.masked_fill(mask == 0, -1e9)
+      scores = scores.masked_fill(
+          mask == 0, -1e4 if scores.dtype == torch.float16 else -1e9)
     
     # Apply the softmax function to the scores.
     scores = torch.softmax(scores, dim=-1)
@@ -283,16 +294,17 @@ class MultiHeadAttention(nn.Module):
       A tensor of shape (batch_size, num_heads, context_size, d_keys)
       representing the input split into num_heads pieces.
     """
-    batch_size, context_size, d_model = x.size()
+    batch_size, context_size, _ = x.size()
     return x.view(
-        batch_size, context_size, self.num_heads, d_model).transpose(1, 2)
+        batch_size, context_size, self.num_heads, self.d_keys).transpose(1, 2)
   
   def concat_heads(self, x: torch.Tensor) -> torch.Tensor:
     """Concatenate the input back into a single tensor.
     
     Args:
-      x: A tensor of shape (batch_size, num_heads, context_size, d_keys)
-        representing the input.
+      x: A tensor of shape
+        (batch_size, num_heads, context_size, d_keys) representing
+        the input.
 
     Returns:
       A tensor of shape (batch_size, context_size, d_model) representing the
@@ -315,7 +327,7 @@ class MultiHeadAttention(nn.Module):
       value: A tensor of shape (batch_size, context_size, d_model) representing
         the value.
       mask: A tensor of shape
-        (batch_size, num_heads, context_size, context_size) representing the
+        (batch_size, context_size, context_size) representing the
         mask to apply to the attention scores.
 
     Returns:
@@ -323,9 +335,12 @@ class MultiHeadAttention(nn.Module):
       output of the multi-head attention.
     """    
     # Apply the linear transformations to the query, key, and value vectors.
-    query = self.split_heads(self.query(query))
-    key = self.split_heads(self.key(key))
-    value = self.split_heads(self.value(value))
+    query = self.split_heads(self.w_query(query))
+    key = self.split_heads(self.w_key(key))
+    value = self.split_heads(self.w_value(value))
+
+    # Add num_heads to the mask.
+    mask = (mask != 0).unsqueeze(1).repeat(1, self.num_heads, 1, 1)
 
     # Calculate the attention scores.
     output = self.scaled_dot_product_attention(query, key, value, mask)
@@ -460,8 +475,9 @@ class DecoderBlock(nn.Module):
       AddAndNorm(dropout) for _ in range(3)
     ])
 
-  def forward(self, x: torch.Tensor, encoder_output: torch.Tensor,
-              input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
+  def forward(
+      self, x: torch.Tensor, encoder_output: torch.Tensor,
+      input_mask: torch.Tensor, output_mask: torch.Tensor) -> torch.Tensor:
     """Apply the decoder block to the input.
 
     Args:
@@ -548,7 +564,7 @@ class PredictionLayer(nn.Module):
     return torch.log_softmax(self.linear(x), dim=-1)
 
 
-class Transformer(nn.module):
+class Transformer(nn.Module):
   """Tha main transformer model that combines the encoder and decoder."""
   def __init__(self,
                input_embeddings: InputEmbedding,
@@ -614,7 +630,62 @@ class Transformer(nn.module):
     return self.decoder(output, encoder_output, input_mask, output_mask)
   
   def predict(self, output: torch.Tensor) -> torch.Tensor:
+    """Predict the output.
+
+    Args:
+      output: A tensor of shape (batch_size, context_size, d_model) representing
+        the output of the decoder.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, vocab_size) representing the
+      output of the prediction layer.
+    """
     return self.prediction_layer(output)
+  
+  def create_mask(self, x: torch.Tensor) -> torch.Tensor:
+    """Create a mask to hide padding tokens.
+    
+    Args:
+      x: A tensor of shape (batch_size, context_size) representing the input.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, context_size)
+      representing the mask to apply to the attention scores.
+    """
+    batch_size = x.size(0)
+    size = x.size(1)
+
+    mask = torch.triu(
+      torch.ones(batch_size, size, size), diagonal = 1).type(torch.int)
+
+    if torch.cuda.is_available():
+      mask = mask.cuda()
+    return mask
+  
+  def forward(
+      self, enc_input: torch.Tensor, dec_input: torch.Tensor) -> torch.Tensor:
+    """Apply the transformer to the input and output.
+    
+    Args:
+      input: A tensor of shape (batch_size, context_size) representing the
+        input.
+      output: A tensor of shape (batch_size, context_size) representing the
+        output.
+    
+    Returns:
+      A tensor of shape (batch_size, context_size, vocab_size) representing the
+      output of the transformer.
+    """
+    # Create the masks for the encoder and decoder.
+    input_mask = self.create_mask(enc_input)
+    output_mask = self.create_mask(dec_input)
+    # Apply the encoder.
+    encoder_output = self.encode(enc_input, input_mask)
+    # Apply the decoder.
+    decoder_output = self.decode(
+        dec_input, encoder_output, input_mask, output_mask)
+    # Predict the output.
+    return self.predict(decoder_output)
 
 
 def create_transformer(input_vocab_size: int, output_vocab_size: int,
@@ -672,6 +743,9 @@ def create_transformer(input_vocab_size: int, output_vocab_size: int,
     output_embeddings, output_positional_encoding, decoder,
     prediction_layer
   )
+
+  if torch.cuda.is_available():
+    transformer = transformer.cuda()
 
   # Initialize the parameters.
   # TODO(teejusb): Understand why this is necessary.
