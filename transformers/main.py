@@ -28,10 +28,18 @@ def main():
   # Dropout rate.
   dropout = 0.1
 
+
+  # Optimizations to fit my system.
+  # Set default data type to float16
+  torch.set_default_dtype(torch.float16)
+  d_model = 256
+  d_ff = 1024
+
+
   batch_size = 64
 
   # How many training examples to use.
-  train_rows = 32768
+  train_rows = 2**15
 
   train, val, test, vocab, context_size = load_data(
       batch_size=batch_size, train_rows=train_rows)
@@ -78,6 +86,9 @@ def main():
     except FileNotFoundError:
       continue
 
+  if checkpoint == None:
+    print("No checkpoint found. Starting from scratch.")
+
   loss_fn = torch.nn.CrossEntropyLoss(
     ignore_index=vocab['fr']['<PAD>']).to(device)
   optimizer = torch.optim.Adam(
@@ -88,6 +99,7 @@ def main():
     if not checkpoint:
       checkpoint = 1
 
+    print("Starting training.")
     for epoch in range(checkpoint, epochs+1):
       # Training
       train_loss = 0.0
