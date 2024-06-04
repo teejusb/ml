@@ -230,9 +230,10 @@ class MultiHeadAttention(nn.Module):
     self.w_value = nn.Linear(d_model, d_model)
     self.w_output = nn.Linear(d_model, d_model)
 
+  @staticmethod
   def scaled_dot_product_attention(
-      self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-      mask: torch.Tensor) -> torch.Tensor:
+      query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+      mask: torch.Tensor, dropout: nn.Dropout) -> torch.Tensor:
     """Apply scaled dot-product attention to the input.
     
     Args:
@@ -245,6 +246,7 @@ class MultiHeadAttention(nn.Module):
       mask: A tensor of shape
         (batch_size, num_heads, context_size, context_size) representing the
         mask to apply to the attention scores.
+      dropout: A nn.Dropout layer to apply to the scores.
     Returns:
       A tensor of shape (batch_size, num_heads, context_size, d_keys)
       representing the output of the scaled dot-product attention.
@@ -277,11 +279,12 @@ class MultiHeadAttention(nn.Module):
     # Apply the softmax function to the scores.
     scores = torch.softmax(scores, dim=-1)
 
-    # Apply dropout to the scores.
-    scores = self.dropout(scores)
+    if dropout is not None:
+      # Apply dropout to the scores.
+      scores = dropout(scores)
 
     # Shape of output: (batch_size, num_heads, context_size, d_keys)
-    return scores @ value
+    return (scores @ value), scores
   
   def split_heads(self, x: torch.Tensor) -> torch.Tensor:
     """Split the input into num_heads pieces.
@@ -343,7 +346,8 @@ class MultiHeadAttention(nn.Module):
     mask = (mask != 0).unsqueeze(1).repeat(1, self.num_heads, 1, 1)
 
     # Calculate the attention scores.
-    output = self.scaled_dot_product_attention(query, key, value, mask)
+    output, self.scores = MultiHeadAttention.scaled_dot_product_attention(
+        query, key, value, mask, self.dropout)
 
     # Concatenate the output of the attention heads.
     output = self.concat_heads(output)
@@ -690,8 +694,8 @@ class Transformer(nn.Module):
 
 def create_transformer(input_vocab_size: int, output_vocab_size: int,
                        input_context_size: int, output_context_size: int,
-                       d_model: int, num_heads: int, N: int, d_ff: int,
-                       dropout: float) -> Transformer:
+                       d_model: int =  512, num_heads: int = 8, N: int = 6,
+                       d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
   """Create a transformer model.
   
   Args:
